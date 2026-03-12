@@ -17,14 +17,29 @@ export async function GET(request: Request) {
             return cookieStore.getAll();
           },
           setAll(cookiesToSet) {
-            cookiesToSet.forEach(({ name, value, options }) => {
-              cookieStore.set(name, value, options);
-            });
+            try {
+              cookiesToSet.forEach(({ name, value, options }) => {
+                cookieStore.set(name, value, options);
+              });
+            } catch {
+              // setAll can throw in Server Components — that's expected
+            }
           },
         },
       }
     );
-    await supabase.auth.exchangeCodeForSession(code);
+
+    const { data, error } = await supabase.auth.exchangeCodeForSession(code);
+
+    // If Google OAuth, create/update the user profile
+    if (!error && data?.user) {
+      const user = data.user;
+      await supabase.from("users").upsert({
+        id: user.id,
+        email: user.email,
+        name: user.user_metadata?.name || user.user_metadata?.full_name || user.email?.split("@")[0],
+      });
+    }
   }
 
   return NextResponse.redirect(new URL("/dashboard", request.url));

@@ -3,7 +3,11 @@ import { NextResponse } from "next/server";
 import type { NextRequest } from "next/server";
 
 export async function middleware(req: NextRequest) {
-  const res = NextResponse.next();
+  let response = NextResponse.next({
+    request: {
+      headers: req.headers,
+    },
+  });
 
   const supabase = createServerClient(
     process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -17,8 +21,10 @@ export async function middleware(req: NextRequest) {
           cookiesToSet.forEach(({ name, value }) => {
             req.cookies.set(name, value);
           });
-          const response = NextResponse.next({
-            request: req,
+          response = NextResponse.next({
+            request: {
+              headers: req.headers,
+            },
           });
           cookiesToSet.forEach(({ name, value, options }) => {
             response.cookies.set(name, value, options);
@@ -28,20 +34,27 @@ export async function middleware(req: NextRequest) {
     }
   );
 
+  // This refreshes the session if needed and sets cookies
   const {
-    data: { session },
-  } = await supabase.auth.getSession();
+    data: { user },
+  } = await supabase.auth.getUser();
 
   const protectedRoutes = ["/dashboard", "/extract", "/profile", "/community"];
   const isProtected = protectedRoutes.some((r) =>
     req.nextUrl.pathname.startsWith(r)
   );
 
-  if (isProtected && !session) {
-    return NextResponse.redirect(new URL("/login", req.url));
+  if (isProtected && !user) {
+    const redirectUrl = new URL("/login", req.url);
+    return NextResponse.redirect(redirectUrl);
   }
 
-  return res;
+  // If user is logged in and visiting login page, redirect to dashboard
+  if (user && req.nextUrl.pathname === "/login") {
+    return NextResponse.redirect(new URL("/dashboard", req.url));
+  }
+
+  return response;
 }
 
 export const config = {
@@ -50,5 +63,6 @@ export const config = {
     "/extract/:path*",
     "/profile/:path*",
     "/community/:path*",
+    "/login",
   ],
 };

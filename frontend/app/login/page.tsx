@@ -108,6 +108,14 @@ export default function LoginPage() {
     const { data, error: authError } = await supabase.auth.signUp({
       email: regEmail,
       password: regPassword,
+      options: {
+        data: {
+          name: regName,
+          branch: regBranch,
+          cgpa: regCgpa ? parseFloat(regCgpa) : null,
+          college: regCollege,
+        },
+      },
     });
 
     if (authError) {
@@ -117,7 +125,8 @@ export default function LoginPage() {
     }
 
     if (data.user) {
-      await supabase.from("users").insert({
+      // Update the profile with additional details (trigger creates the row)
+      await supabase.from("users").upsert({
         id: data.user.id,
         email: regEmail,
         name: regName,
@@ -125,6 +134,13 @@ export default function LoginPage() {
         cgpa: regCgpa ? parseFloat(regCgpa) : null,
         college: regCollege,
       });
+
+      // If session exists (email confirm disabled), redirect directly
+      if (data.session) {
+        router.push("/dashboard");
+        return;
+      }
+
       setSuccess(true);
     }
     setLoading(false);
