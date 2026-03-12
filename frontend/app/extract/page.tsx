@@ -96,10 +96,9 @@ export default function ExtractPage() {
     try {
       const result = await extractOpportunity(inputText);
       setExtractedData(result);
-    } catch (_err) {
-      setError(
-        "Failed to extract opportunity. Please check your API connection and try again."
-      );
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Extraction failed";
+      setError(msg);
     } finally {
       setLoading(false);
     }

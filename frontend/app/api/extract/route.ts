@@ -1,19 +1,22 @@
 import { NextRequest, NextResponse } from "next/server";
 import Groq from "groq-sdk";
 
-const EXTRACT_PROMPT = `You are an expert opportunity parser for Indian college students. Extract details from this student opportunity message and return ONLY valid JSON with absolutely no extra text, no markdown, no backticks:
-{
-  "company": "company name",
-  "role": "job/internship title",
-  "type": "Internship or Job or Hackathon or Scholarship",
-  "branch_eligible": "CSE, ECE, IT or All",
-  "cgpa_required": 7.5 or null,
-  "deadline": "YYYY-MM-DD" or null,
-  "location": "city name or Remote",
-  "stipend": "amount with rupee symbol or Not mentioned",
-  "apply_link": "https://... or null"
-}
-Message: `;
+const EXTRACT_PROMPT = `You are an expert opportunity parser for Indian college students. Extract details from this student opportunity message and return ONLY valid JSON with absolutely no extra text, no markdown, no backticks.
+
+Rules:
+- If its a government job, set type to "Job"
+- company should be the organization name
+- role should be the position/post name 
+- branch_eligible should be relevant branches or "All"
+- If deadline is mentioned, convert to YYYY-MM-DD format
+- If no stipend/salary mentioned, use "Not mentioned"
+- Extract any apply link/URL from the message
+
+Return EXACTLY this JSON structure:
+{"company":"org name","role":"position","type":"Internship","branch_eligible":"All","cgpa_required":null,"deadline":null,"location":"Remote","stipend":"Not mentioned","apply_link":null}
+
+Message to parse:
+`;
 
 function calculateUrgency(deadlineStr: string | null): { days_left: number; urgency: string } {
   if (!deadlineStr) return { days_left: 99, urgency: "green" };
@@ -31,20 +34,40 @@ function calculateUrgency(deadlineStr: string | null): { days_left: number; urge
   }
 }
 
+function cleanAndParseJSON(raw: string): Record<string, unknown> {
+  // Strip markdown code fences
+  raw = raw.replace(/```json\s*/gi, "").replace(/```\s*/g, "").trim();
+  // Try to find JSON object in the response
+  const jsonMatch = raw.match(/\{[\s\S]*\}/);
+  if (jsonMatch) {
+    return JSON.parse(jsonMatch[0]);
+  }
+  return JSON.parse(raw);
+}
+
 async function extractWithGroq(text: string) {
-  const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
+  const apiKey = process.env.GROQ_API_KEY;
+  if (!apiKey) throw new Error("GROQ_API_KEY not configured");
+  
+  const groq = new Groq({ apiKey });
   const response = await groq.chat.completions.create({
     model: "llama-3.3-70b-versatile",
-    messages: [{ role: "user", content: EXTRACT_PROMPT + text }],
+    messages: [
+      { role: "system", content: "You are a JSON-only response bot. Return only valid JSON, no other text." },
+      { role: "user", content: EXTRACT_PROMPT + text }
+    ],
     max_tokens: 500,
+    temperature: 0.1,
   });
-  let raw = response.choices[0]?.message?.content?.trim() || "";
-  raw = raw.replace(/```json/g, "").replace(/```/g, "").trim();
-  return JSON.parse(raw);
+  const raw = response.choices[0]?.message?.content?.trim() || "";
+  console.log("[Groq] Raw response:", raw.substring(0, 200));
+  return cleanAndParseJSON(raw);
 }
 
 async function extractWithGemini(text: string) {
   const apiKey = process.env.GEMINI_API_KEY;
+  if (!apiKey) throw new Error("GEMINI_API_KEY not configured");
+
   const res = await fetch(
     `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`,
     {
@@ -52,13 +75,21 @@ async function extractWithGemini(text: string) {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         contents: [{ parts: [{ text: EXTRACT_PROMPT + text }] }],
+        generationConfig: { temperature: 0.1 },
       }),
     }
   );
+  
+  if (!res.ok) {
+    const errText = await res.text();
+    console.error("[Gemini] HTTP error:", res.status, errText.substring(0, 200));
+    throw new Error(`Gemini API returned ${res.status}`);
+  }
+  
   const data = await res.json();
-  let raw = data.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || "";
-  raw = raw.replace(/```json/g, "").replace(/```/g, "").trim();
-  return JSON.parse(raw);
+  const raw = data.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || "";
+  console.log("[Gemini] Raw response:", raw.substring(0, 200));
+  return cleanAndParseJSON(raw);
 }
 
 export async function POST(req: NextRequest) {
@@ -70,29 +101,39 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "No text provided" }, { status: 400 });
     }
 
+    // Strip emojis and special unicode for cleaner AI parsing
+    const cleanText = text.replace(/[^\x00-\x7F]/g, " ").replace(/\s+/g, " ").trim();
+
     let result;
+    let groqError = "";
+    let geminiError = "";
 
     // Try Groq first, fallback to Gemini
     try {
-      result = await extractWithGroq(text);
-    } catch {
+      result = await extractWithGroq(cleanText);
+    } catch (e1) {
+      groqError = String(e1);
+      console.error("[Extract] Groq failed:", groqError);
       try {
-        result = await extractWithGemini(text);
+        result = await extractWithGemini(cleanText);
       } catch (e2) {
+        geminiError = String(e2);
+        console.error("[Extract] Gemini also failed:", geminiError);
         return NextResponse.json(
-          { error: `AI extraction failed: ${String(e2)}` },
+          { error: `Both AI providers failed. Groq: ${groqError}. Gemini: ${geminiError}` },
           { status: 500 }
         );
       }
     }
 
-    const { days_left, urgency } = calculateUrgency(result.deadline || null);
+    const { days_left, urgency } = calculateUrgency(result.deadline as string || null);
     result.days_left = days_left;
     result.urgency = urgency;
     result.raw_text = text;
 
     return NextResponse.json(result);
   } catch (err) {
+    console.error("[Extract] Unexpected error:", err);
     return NextResponse.json(
       { error: `Server error: ${String(err)}` },
       { status: 500 }
