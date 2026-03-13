@@ -262,7 +262,6 @@ export default function CommunityDetailPage() {
       .eq("id", communityId);
 
     setAccessDenied(false);
-    setIsMember(true);
     setJoining(false);
     setJoinPassword("");
     await fetchCommunityData();
